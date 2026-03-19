@@ -1,7 +1,39 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
+import threading
 import platform, socket, getpass, psutil, subprocess, time, os
 from datetime import datetime
+
+# ===============================
+# TOOLTIP
+# ===============================
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, event=None):
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 20
+        y += self.widget.winfo_rooty() + 20
+
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.geometry(f"+{x}+{y}")
+
+        label = tk.Label(self.tip, text=self.text,
+                         bg="#1e293b", fg="white",
+                         font=("Segoe UI", 9), relief="solid", bd=1)
+        label.pack()
+
+    def hide(self, event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
 
 
 # ===============================
@@ -17,16 +49,33 @@ def get_system_info():
 
 
 def get_disk_usage():
-    try:
-        disk = psutil.disk_usage('C:\\')
-    except:
-        disk = psutil.disk_usage('/')
-
-    return {"Usage %": disk.percent}
+    disk = psutil.disk_usage("C:\\" if os.name == "nt" else "/")
+    return {
+        "Total (GB)": round(disk.total / (1024**3), 2),
+        "Used (GB)": round(disk.used / (1024**3), 2),
+        "Free (GB)": round(disk.free / (1024**3), 2),
+        "Usage %": disk.percent,
+    }
 
 
 def get_memory_usage():
-    return {"Usage %": psutil.virtual_memory().percent}
+    mem = psutil.virtual_memory()
+    return {
+        "Total (GB)": round(mem.total / (1024**3), 2),
+        "Used (GB)": round(mem.used / (1024**3), 2),
+        "Available (GB)": round(mem.available / (1024**3), 2),
+        "Usage %": mem.percent,
+    }
+
+
+def get_top_processes(limit=5):
+    procs = []
+    for p in psutil.process_iter(["pid", "name", "memory_percent"]):
+        try:
+            procs.append(p.info)
+        except:
+            pass
+    return sorted(procs, key=lambda x: x["memory_percent"], reverse=True)[:limit]
 
 
 def get_network_status():
@@ -39,269 +88,206 @@ def get_network_status():
     return {"Internet": internet}
 
 
+def save_current_report():
+    content = output.get(1.0, tk.END)
+
+    if not content.strip():
+        messagebox.showwarning("Warning", "No report to save")
+        return
+
+    if not os.path.exists("reports"):
+        os.makedirs("reports")
+
+    file_path = f"reports/report_{int(time.time())}.txt"
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    messagebox.showinfo("Saved", f"Report saved:\n{file_path}")
+
+
+# ===============================
+# DETECTION
+# ===============================
 def detect_issues(disk, memory, network):
     issues = []
 
     if disk["Usage %"] > 90:
-        issues.append(("CRITICAL", "Disk usage above 90%"))
+        issues.append(("CRITICAL", "Disk usage above 90%", "Run cleanup"))
 
     if memory["Usage %"] > 85:
-        issues.append(("WARNING", "High memory usage"))
+        issues.append(("WARNING", "High memory usage", "Close heavy apps"))
 
     if network["Internet"] == "FAILED":
-        issues.append(("HIGH", "No internet"))
+        issues.append(("HIGH", "No internet", "Reset network"))
 
     return issues
 
 
-def generate_recommendations(issues):
-    rec = []
+# ===============================
+# AUTO FIX
+# ===============================
+def auto_fix(issues):
+    results = []
 
-    for lvl, issue in issues:
-        if "memory" in issue.lower():
-            rec.append("Close unused apps")
-        elif "disk" in issue.lower():
-            rec.append("Free disk space")
-        elif "internet" in issue.lower():
-            rec.append("Check router/ISP")
+    for lvl, issue, action in issues:
+        try:
+            if "internet" in issue.lower():
+                subprocess.run("ipconfig /flushdns", shell=True)
+                results.append("DNS flushed")
 
-    return list(set(rec)) if rec else ["System healthy"]
+            elif "disk" in issue.lower():
+                subprocess.run("cleanmgr", shell=True)
+                results.append("Disk cleanup opened")
 
+            elif "memory" in issue.lower():
+                results.append("Close apps manually (safe mode)")
 
-def save_report(text):
-    if not os.path.exists("reports"):
-        os.makedirs("reports")
+        except:
+            results.append(f"Failed: {issue}")
 
-    filename = f"reports/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(text)
-
-    return filename
+    return results
 
 
-def kill_process_by_pid():
+# ===============================
+# PROCESS KILL
+# ===============================
+def kill_process():
     pid = pid_entry.get().strip()
 
     if not pid.isdigit():
-        messagebox.showerror("Error", "Enter a valid numeric PID")
+        messagebox.showerror("Error", "Invalid PID")
         return
 
-    pid = int(pid)
-
     try:
-        proc = psutil.Process(pid)
-        name = proc.name()
-
-        proc.terminate()  # graceful kill
-        proc.wait(timeout=3)
-
-        messagebox.showinfo("Success", f"Process '{name}' (PID {pid}) terminated")
-
-    except psutil.NoSuchProcess:
-        messagebox.showerror("Error", f"No process with PID {pid}")
-
-    except psutil.AccessDenied:
-        messagebox.showerror("Error", "Access denied (Run as Administrator)")
-
-    except psutil.TimeoutExpired:
-        proc.kill()
-        messagebox.showwarning("Forced Kill", f"Process PID {pid} force killed")
+        p = psutil.Process(int(pid))
+        name = p.name()
+        p.terminate()
+        messagebox.showinfo("Success", f"{name} terminated")
 
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
 
 # ===============================
-# PROGRESS BAR
+# PROGRESS
 # ===============================
-def draw_progress(percent, message=""):
+def draw_progress(p, msg=""):
     canvas.delete("all")
 
-    # Background ring
-    canvas.create_oval(10, 10, 190, 190, outline="#1e293b", width=10)
+    canvas.create_oval(10, 10, 190, 190, outline="#1e3a8a", width=10)
 
-    # Progress arc
-    extent = (percent / 100) * 360
     canvas.create_arc(
-        10, 10, 190, 190,
+        10,
+        10,
+        190,
+        190,
         start=90,
-        extent=-extent,
+        extent=-(p / 100) * 360,
         style="arc",
-        outline="#22c55e",
-        width=10
+        outline="#3b82f6",
+        width=10,
     )
 
-    # Percentage
     canvas.create_text(
-        100, 90,
-        text=f"{percent}%",
-        fill="white",
-        font=("Segoe UI", 16, "bold")
+        100, 90, text=f"{p}%", fill="white", font=("Segoe UI", 16, "bold")
     )
 
-    # Message
-    canvas.create_text(
-        100, 120,
-        text=message,
-        fill="#94a3b8",
-        font=("Segoe UI", 9)
-    )
+    canvas.create_text(100, 120, text=msg, fill="#93c5fd", font=("Segoe UI", 9))
 
     root.update_idletasks()
 
 
-def get_progress_message(p):
-    if p < 20:
+def msg(p):
+    if p < 30:
         return "Initializing..."
-    elif p < 40:
-        return "Collecting system info..."
     elif p < 60:
-        return "Analyzing resources..."
-    elif p < 80:
+        return "Analyzing..."
+    elif p < 90:
         return "Checking network..."
-    elif p < 95:
-        return "Finalizing..."
     else:
         return "Almost there..."
 
 
 # ===============================
-# MAIN SCAN
+# SCAN THREAD
 # ===============================
 def run_scan():
-    output.delete(1.0, tk.END)
+    threading.Thread(target=scan).start()
 
+
+def scan():
+    output.delete(1.0, tk.END)
     start = time.time()
 
-    steps = [
-        ("system", 15),
-        ("disk", 30),
-        ("memory", 45),
-        ("processes", 60),
-        ("network", 80),
-        ("final", 100)
-    ]
+    for i in range(0, 101, 2):
+        draw_progress(i, msg(i))
+        time.sleep(0.01)
 
-    results = {}
+    system = get_system_info()
+    disk = get_disk_usage()
+    memory = get_memory_usage()
+    procs = get_top_processes()
+    network = get_network_status()
 
-    for step, percent in steps:
+    issues = detect_issues(disk, memory, network)
 
-        for p in range(percent - 15 if percent > 15 else 0, percent + 1, 2):
-            draw_progress(p, get_progress_message(p))
-            time.sleep(0.02)
+    # DISPLAY
+    output.insert(tk.END, "===== IT SUPPORT REPORT =====\n\n")
 
-        if step == "system":
-            results["system"] = get_system_info()
+    for k, v in system.items():
+        output.insert(tk.END, f"{k}: {v}\n")
 
-        elif step == "disk":
-            disk_full = psutil.disk_usage('C:\\' if os.name == 'nt' else '/')
-            results["disk"] = {
-                "Total (GB)": round(disk_full.total / (1024**3), 2),
-                "Used (GB)": round(disk_full.used / (1024**3), 2),
-                "Free (GB)": round(disk_full.free / (1024**3), 2),
-                "Usage %": disk_full.percent
-            }
+    output.insert(tk.END, "\nDisk:\n")
+    for k, v in disk.items():
+        output.insert(tk.END, f"{k}: {v}\n")
 
-        elif step == "memory":
-            mem = psutil.virtual_memory()
-            results["memory"] = {
-                "Total (GB)": round(mem.total / (1024**3), 2),
-                "Used (GB)": round(mem.used / (1024**3), 2),
-                "Available (GB)": round(mem.available / (1024**3), 2),
-                "Usage %": mem.percent
-            }
+    output.insert(tk.END, "\nMemory:\n")
+    for k, v in memory.items():
+        output.insert(tk.END, f"{k}: {v}\n")
 
-        elif step == "processes":
-            procs = []
-            for proc in psutil.process_iter(['pid','name','memory_percent']):
-                try:
-                    procs.append(proc.info)
-                except:
-                    continue
-            procs = sorted(procs, key=lambda x: x['memory_percent'], reverse=True)
-            results["processes"] = procs[:5]
+    output.insert(tk.END, "\nTop Processes:\n")
+    for p in procs:
+        output.insert(
+            tk.END, f"{p['name']} (PID {p['pid']}) -> {round(p['memory_percent'],2)}%\n"
+        )
 
-        elif step == "network":
-            results["network"] = {
-                "Internet": get_network_status()["Internet"],
-                "DNS": "OK" if socket.gethostbyname("google.com") else "FAILED",
-                "Ping": "Reachable"
-            }
+    output.insert(tk.END, "\nNetwork:\n")
+    for k, v in network.items():
+        output.insert(tk.END, f"{k}: {v}\n")
 
-    # Issues with impact
-    issues = []
-
-    if results["disk"]["Usage %"] > 90:
-        issues.append(("CRITICAL", "Disk usage above 90%", "System may crash"))
-
-    if results["memory"]["Usage %"] > 85:
-        issues.append(("WARNING", "High memory usage", "System slowdown"))
-
-    if results["network"]["Internet"] == "FAILED":
-        issues.append(("HIGH", "No internet", "No external access"))
-
-    recs = generate_recommendations([(lvl, msg) for lvl, msg, _ in issues])
-
-    # ===============================
-    # FULL REPORT (RESTORED)
-    # ===============================
-    report = "\n==*==*==*= IT SUPPORT DIAGNOSTICS REPORT =*==*==*==\n\n"
-
-    report += "System Info:\n"
-    for k, v in results["system"].items():
-        report += f"{k}: {v}\n"
-
-    report += "\nDisk Usage:\n"
-    for k, v in results["disk"].items():
-        report += f"{k}: {v}\n"
-
-    report += "\nMemory Usage:\n"
-    for k, v in results["memory"].items():
-        report += f"{k}: {v}\n"
-
-    report += "\nTop Processes:\n"
-    for p in results["processes"]:
-        report += f"{p['name']} (PID: {p.get('pid','N/A')}) -> {round(p['memory_percent'],2)}%\n"
-
-    report += "\nNetwork Status:\n"
-    for k, v in results["network"].items():
-        report += f"{k}: {v}\n"
-
-    output.insert(tk.END, report)
-
-    # ===============================
-    # COLORED ISSUES
-    # ===============================
     output.insert(tk.END, "\nIssues:\n", "header")
-
-    for lvl, msg, impact in issues:
+    for lvl, msgg, impact in issues:
         tag = "red" if lvl == "CRITICAL" else "orange" if lvl == "HIGH" else "yellow"
-        output.insert(tk.END, f"[{lvl}] {msg} -> {impact}\n", tag)
+        output.insert(tk.END, f"[{lvl}] {msgg} -> {impact}\n", tag)
 
     if not issues:
-        output.insert(tk.END, "[OK] No issues detected\n", "green")
-
-    # ===============================
-    # RECOMMENDATIONS
-    # ===============================
-    output.insert(tk.END, "\nRecommendations:\n", "header")
-    for r in recs:
-        output.insert(tk.END, f"- {r}\n", "green")
+        output.insert(tk.END, "[OK] System healthy\n", "green")
 
     output.insert(tk.END, f"\nScan Time: {round(time.time()-start,2)}s\n")
 
     draw_progress(100, "Completed")
 
 
-def save_current_report():
+# ===============================
+# FIX BUTTON
+# ===============================
+def run_fix():
     content = output.get(1.0, tk.END)
-    if not content.strip():
-        messagebox.showwarning("Warning", "Run scan first")
+    if "Issues" not in content:
+        messagebox.showwarning("Run scan first", "")
         return
 
-    path = save_report(content)
-    messagebox.showinfo("Saved", f"Saved to:\n{path}")
+    disk = get_disk_usage()
+    memory = get_memory_usage()
+    network = get_network_status()
+
+    issues = detect_issues(disk, memory, network)
+    fixes = auto_fix(issues)
+
+    output.insert(tk.END, "\nFix Results:\n", "header")
+    for f in fixes:
+        output.insert(tk.END, f"- {f}\n", "green")
 
 
 # ===============================
@@ -309,78 +295,57 @@ def save_current_report():
 # ===============================
 root = tk.Tk()
 root.title("IT Support Toolkit")
-root.geometry("850x650")
+root.geometry("900x700")
 root.configure(bg="#0f172a")
 
-# Header
-header = tk.Label(root, text="IT SUPPORT DIAGNOSTICS",
-                  font=("Segoe UI", 18, "bold"),
-                  bg="#0f172a", fg="#38bdf8")
-header.pack(pady=10)
+tk.Label(
+    root,
+    text="IT SUPPORT TOOL",
+    bg="#0f172a",
+    fg="#3b82f6",
+    font=("Segoe UI", 18, "bold"),
+).pack(pady=10)
 
-# Progress Circle
-canvas = tk.Canvas(root, width=200, height=200,
-                   bg="#0f172a", highlightthickness=0)
-canvas.pack(pady=5)
+canvas = tk.Canvas(root, width=200, height=200, bg="#0f172a", highlightthickness=0)
+canvas.pack()
 
-# Buttons
-btn_frame = tk.Frame(root, bg="#0f172a")
-btn_frame.pack(pady=5)
+# BUTTON ROW
+top_frame = tk.Frame(root, bg="#0f172a")
+top_frame.pack(pady=10)
 
-scan_btn = tk.Button(btn_frame, text="Run Scan",
-                     bg="#22c55e", fg="black",
-                     font=("Segoe UI", 10, "bold"),
-                     padx=15, pady=5,
-                     command=run_scan)
-scan_btn.pack(side=tk.LEFT, padx=10)
+btn_scan = tk.Button(top_frame, text="▶ Scan", bg="#3b82f6", fg="white", command=run_scan)
+btn_scan.pack(side=tk.LEFT, padx=5)
+ToolTip(btn_scan, "Run system diagnostics")
 
-save_btn = tk.Button(btn_frame, text="Save Report",
-                     bg="#3b82f6", fg="white",
-                     font=("Segoe UI", 10, "bold"),
-                     padx=15, pady=5,
-                     command=save_current_report)
-save_btn.pack(side=tk.LEFT, padx=10)
+btn_fix = tk.Button(top_frame, text="🛠 Fix", bg="#22c55e", fg="black", command=auto_fix)
+btn_fix.pack(side=tk.LEFT, padx=5)
+ToolTip(btn_fix, "Attempt automatic fixes")
 
-# ===============================
-# PROCESS CONTROL SECTION
-# ===============================
-proc_frame = tk.Frame(root, bg="#0f172a")
-proc_frame.pack(pady=10)
+btn_save = tk.Button(top_frame, text="💾 Save", bg="#f59e0b", fg="black", command=save_current_report)
+btn_save.pack(side=tk.LEFT, padx=5)
+ToolTip(btn_save, "Save report to file")
 
-pid_label = tk.Label(proc_frame, text="Enter PID:",
-                     bg="#0f172a", fg="white",
-                     font=("Segoe UI", 10))
-pid_label.pack(side=tk.LEFT, padx=5)
+# Spacer (optional for separation)
+tk.Label(top_frame, text="   ", bg="#0f172a").pack(side=tk.LEFT)
 
-pid_entry = tk.Entry(proc_frame, width=10, font=("Segoe UI", 10))
+# PID Entry (SECOND LAST)
+pid_entry = tk.Entry(top_frame, width=10, font=("Segoe UI", 10))
 pid_entry.pack(side=tk.LEFT, padx=5)
 
-kill_btn = tk.Button(proc_frame,
-                     text="Kill Process",
-                     bg="#ef4444",
-                     fg="white",
-                     font=("Segoe UI", 10, "bold"),
-                     padx=10,
-                     command=kill_process_by_pid)
-kill_btn.pack(side=tk.LEFT, padx=10)
+# Kill Button (LAST)
+tk.Button(
+    top_frame, text="❌ Kill", bg="#ef4444", fg="white", padx=10, command=kill_process
+).pack(side=tk.LEFT, padx=5)
 
-# Output Box
 output = scrolledtext.ScrolledText(
-    root,
-    wrap=tk.WORD,
-    font=("Consolas", 10),
-    bg="#020617",
-    fg="#e5e7eb",
-    insertbackground="white"
+    root, bg="#020617", fg="white", font=("Consolas", 10)
 )
-output.pack(expand=True, fill="both", padx=15, pady=10)
+output.pack(expand=True, fill="both", padx=10, pady=10)
 
-# Colors
 output.tag_config("red", foreground="#ef4444")
 output.tag_config("orange", foreground="#f97316")
 output.tag_config("yellow", foreground="#eab308")
 output.tag_config("green", foreground="#22c55e")
-output.tag_config("header", foreground="#38bdf8", font=("Consolas", 11, "bold"))
+output.tag_config("header", foreground="#3b82f6")
 
 root.mainloop()
-
